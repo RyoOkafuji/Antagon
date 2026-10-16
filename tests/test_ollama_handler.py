@@ -1,16 +1,26 @@
 import importlib.util
+import sys
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+from importlib.machinery import SourceFileLoader
 
 import requests
 
 
 def load_cli_module():
     module_path = Path(__file__).resolve().parents[1] / "Antagon Core CLI"
-    spec = importlib.util.spec_from_file_location("antagon_core_cli", module_path)
+    loader = SourceFileLoader("antagon_core_cli", str(module_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    fake_genai = types.ModuleType("google.generativeai")
+    fake_genai.configure = Mock()
+    fake_genai.GenerativeModel = Mock()
+    fake_google = types.ModuleType("google")
+    fake_google.generativeai = fake_genai
+    with patch.dict(sys.modules, {"google": fake_google, "google.generativeai": fake_genai}):
+        loader.exec_module(module)
     return module
 
 

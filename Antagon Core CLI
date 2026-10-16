@@ -1,0 +1,109 @@
+import os
+import requests
+import json
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt, Confirm
+from rich.markdown import Markdown
+from rich.progress import Progress
+import google.generativeai as genai
+
+console = Console()
+
+# --- Agent Prompts ---
+AGENTS = {
+    "Pedant": {
+        "role": "細密家 (The Pedant)",
+        "color": "cyan",
+        "prompt": """あなたは極めて厳格な「細密家」です。以下の文章の「言葉の定義の曖昧さ」「前提条件のブレ」のみを容赦無く指摘してください。
+        解決策は教えず、ただ鋭い問い（「〜という言葉の定義は何か？」「〜という前提は常に成り立つのか？」）を3つ箇条書きで突きつけてください。日本語で出力してください。"""
+    },
+    "Skeptic": {
+        "role": "懐疑主義者 (The Skeptic)",
+        "color": "magenta",
+        "prompt": """あなたは冷酷な「懐疑主義者」です。以下の文章の「論理の飛躍」「相関関係と因果関係の混同」「極端な二項対立」のみを容赦無く指摘してください。
+        解決策は教えず、ただ鋭い問い（「AだからBという論理は飛躍している。Cの可能性は？」「これは因果関係ではなくただの相関ではないか？」）を3つ箇条書きで突きつけてください。日本語で出力してください。"""
+    },
+    "Empiricist": {
+        "role": "実証主義者 (The Empiricist)",
+        "color": "yellow",
+        "prompt": """あなたは徹底した「実証主義者」です。以下の文章の「客観的データの不足」「反例の存在」「主観的な決めつけ」のみを容赦無く指摘してください。
+        解決策は教えず、ただ鋭い問い（「これを裏付ける統計データはあるのか？」「〜という反例が存在するがどう説明するのか？」）を3つ箇条書きで突きつけてください。日本語で出力してください。"""
+    }
+}
+
+# --- LLM Handlers ---
+def ask_gemini(text, system_prompt, api_key):
+    genai.configure(api_key=api_key)
+    # Gemini 1.5 Flashは高速で無料枠に最適
+    model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=system_prompt)
+    response = model.generate_content(text)
+    return response.text
+
+def ask_ollama(text, system_prompt, model_name="llama3"):
+    url = "http://localhost:11434/api/generate"
+    payload = {
+        "model": model_name,
+        "prompt": f"{system_prompt}\n\n対象の文章:\n{text}",
+        "stream": False
+    }
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        return response.json()["response"]
+    except requests.exceptions.RequestException as e:
+        return f"Ollamaとの通信に失敗しました。Ollamaが起動しているか確認してください。\nError: {e}"
+
+# --- Main Application ---
+def main():
+    console.print(Panel.fit("[bold red]Antagon 🎭[/bold red]\n[italic]Your Personal Devil's Advocate[/italic]"))
+    
+    # 1. 動作モードの選択 (BYOK or Local)
+    mode = Prompt.ask("使用するAIエンジンを選択してください", choices=["gemini", "ollama"], default="gemini")
+    
+    api_key = ""
+    ollama_model = ""
+    
+    if mode == "gemini":
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            api_key = Prompt.ask("Gemini API Keyを入力してください (入力は隠されます)", password=True)
+    else:
+        ollama_model = Prompt.ask("Ollamaのモデル名を入力してください", default="llama3")
+
+    # 2. 攻撃対象のテキスト入力
+    console.print("\n[bold green]攻撃対象の主張や論文のドラフトを入力してください（複数行可。終了するには空行でEnter）:[/bold green]")
+    lines = []
+    while True:
+        line = input()
+        if not line:
+            break
+        lines.append(line)
+    
+    target_text = "\n".join(lines)
+    if not target_text.strip():
+        console.print("[red]テキストが入力されていません。終了します。[/red]")
+        return
+
+    console.print("\n[bold red]💥 Multi-Agent Red Teaming Initiated...[/bold red]")
+
+    # 3. 各エージェントによる攻撃の実行
+    for agent_name, agent_data in AGENTS.items():
+        with Progress() as progress:
+            task = progress.add_task(f"[bold {agent_data['color']}] {agent_data['role']} があなたの論理を解析中...", total=100)
+            
+            # API呼び出し
+            if mode == "gemini":
+                result = ask_gemini(target_text, agent_data["prompt"], api_key)
+            else:
+                result = ask_ollama(target_text, agent_data["prompt"], ollama_model)
+            
+            progress.update(task, advance=100)
+            
+        # 結果の表示
+        console.print(Panel(Markdown(result), title=f"[bold {agent_data['color']}]{agent_data['role']}[/bold {agent_data['color']}]", border_style=agent_data["color"]))
+
+    console.print("\n[bold]防御（Defense）フェーズはWeb Canvas UIにて実装予定です。[/bold]")
+
+if __name__ == "__main__":
+    main()

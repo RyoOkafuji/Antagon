@@ -50,8 +50,12 @@ def ask_ollama(text, system_prompt, model_name="llama3"):
     try:
         response = requests.post(url, json=payload)
         response.raise_for_status()
-        return response.json()["response"]
-    except requests.exceptions.RequestException as e:
+        response_data = response.json()
+        ollama_response = response_data.get("response")
+        if not ollama_response:
+            return "Ollamaの応答形式が不正です。'response' フィールドが見つかりません。"
+        return ollama_response
+    except (requests.exceptions.RequestException, ValueError) as e:
         return f"Ollamaとの通信に失敗しました。Ollamaが起動しているか確認してください。\nError: {e}"
 
 # --- Main Application ---
@@ -67,7 +71,7 @@ def main():
     if mode == "gemini":
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
-            api_key = Prompt.ask("Gemini API Keyを入力してください (入力は隠されます)", password=True)
+            api_key = Prompt.ask("Gemini API Keyを入力してください")
     else:
         ollama_model = Prompt.ask("Ollamaのモデル名を入力してください", default="llama3")
 

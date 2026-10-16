@@ -21,17 +21,23 @@
 ```bash
 git clone https://github.com/yourusername/antagon.git
 cd antagon
-pip install -r requirements.txt
+pip install -r Requirements
 ```
 
 # 🎮 使い方
 ​AntagonのCLIを起動します：
 ```bash
-python antagon.py
+python "Antagon Core CLI"
 ```
 1. ​エンジンの選択: gemini (APIキー入力) または ollama (ローカル起動) を選択します。  
 ​2. テキストの入力: 攻撃対象となるあなたの主張、レポート、または論文のドラフトを貼り付けます。  
 ​3. 攻撃開始: 3つのAIエージェントが、あなたの文章を容赦無く解体し、鋭い問いを投げかけてくるのを観察してください。
+
+# 🧪 開発者向け
+現在のテストは `unittest` で管理されています。リポジトリ直下で次を実行してください。
+```bash
+python -m unittest discover -s tests
+```
 
 # 🤝 コントリビュート
 ​Antagonは現在、CLI（コマンドライン）フェーズとして開発がスタートしたばかりです。

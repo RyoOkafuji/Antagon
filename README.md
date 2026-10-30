@@ -29,9 +29,23 @@ pip install -r Requirements
 ```bash
 python "Antagon Core CLI"
 ```
-1. ​エンジンの選択: gemini (APIキー入力) または ollama (ローカル起動) を選択します。  
-​2. テキストの入力: 攻撃対象となるあなたの主張、レポート、または論文のドラフトを貼り付けます。  
-​3. 攻撃開始: 3つのAIエージェントが、あなたの文章を容赦無く解体し、鋭い問いを投げかけてくるのを観察してください。
+1. ​プラットフォームの選択: `gemini`、`ollama`、`openai`、`claude`、`copilot` から選択します。
+2. ​テキストの入力: 攻撃対象となるあなたの主張、レポート、または論文のドラフトを貼り付けます。
+3. 攻撃開始: 3つのAIエージェントが並列で文章を分析します。
+4. 必要に応じて、分析結果をMarkdownファイルへ保存します。
+
+### APIキーとプラットフォーム
+
+APIキーは環境変数で設定できます。未設定の場合はCLIで非表示入力されます。
+
+| プラットフォーム | 環境変数 | 既定モデル |
+|---|---|---|
+| Gemini | `GEMINI_API_KEY` | `gemini-1.5-flash` |
+| OpenAI / ChatGPT | `OPENAI_API_KEY` | `gpt-4o-mini` |
+| Claude | `ANTHROPIC_API_KEY` | `claude-3-5-sonnet-latest` |
+| Copilot / GitHub Models | `GITHUB_TOKEN` | `openai/gpt-4o-mini` |
+
+`copilot` はGitHub ModelsなどのOpenAI互換エンドポイントを利用します。実際に利用するエンドポイントとモデルは契約・アカウント設定に合わせて入力してください。OpenAI互換APIはベースURLを変更できるため、他の対応サービスも利用できます。
 
 # 🧪 開発者向け
 現在のテストは `unittest` で管理されています。リポジトリ直下で次を実行してください。

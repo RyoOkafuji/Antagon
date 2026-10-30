@@ -1,113 +1,291 @@
 import os
-import requests
-import json
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
-from rich.markdown import Markdown
-from rich.progress import Progress
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
+from time import sleep
+
 import google.generativeai as genai
+import requests
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.progress import Progress
+from rich.prompt import Confirm, Prompt
 
 console = Console()
+REQUEST_TIMEOUT = 30
+MAX_RETRIES = 3
 
-# --- Agent Prompts ---
 AGENTS = {
     "Pedant": {
         "role": "細密家 (The Pedant)",
         "color": "cyan",
         "prompt": """あなたは極めて厳格な「細密家」です。以下の文章の「言葉の定義の曖昧さ」「前提条件のブレ」のみを容赦無く指摘してください。
-        解決策は教えず、ただ鋭い問い（「〜という言葉の定義は何か？」「〜という前提は常に成り立つのか？」）を3つ箇条書きで突きつけてください。日本語で出力してください。"""
+解決策は教えず、ただ鋭い問い（「〜という言葉の定義は何か？」「〜という前提は常に成り立つのか？」）を3つ箇条書きで突きつけてください。日本語で出力してください。""",
     },
     "Skeptic": {
         "role": "懐疑主義者 (The Skeptic)",
         "color": "magenta",
         "prompt": """あなたは冷酷な「懐疑主義者」です。以下の文章の「論理の飛躍」「相関関係と因果関係の混同」「極端な二項対立」のみを容赦無く指摘してください。
-        解決策は教えず、ただ鋭い問い（「AだからBという論理は飛躍している。Cの可能性は？」「これは因果関係ではなくただの相関ではないか？」）を3つ箇条書きで突きつけてください。日本語で出力してください。"""
+解決策は教えず、ただ鋭い問い（「AだからBという論理は飛躍している。Cの可能性は？」「これは因果関係ではなくただの相関ではないか？」）を3つ箇条書きで突きつけてください。日本語で出力してください。""",
     },
     "Empiricist": {
         "role": "実証主義者 (The Empiricist)",
         "color": "yellow",
         "prompt": """あなたは徹底した「実証主義者」です。以下の文章の「客観的データの不足」「反例の存在」「主観的な決めつけ」のみを容赦無く指摘してください。
-        解決策は教えず、ただ鋭い問い（「これを裏付ける統計データはあるのか？」「〜という反例が存在するがどう説明するのか？」）を3つ箇条書きで突きつけてください。日本語で出力してください。"""
-    }
+解決策は教えず、ただ鋭い問い（「これを裏付ける統計データはあるのか？」「〜という反例が存在するがどう説明するのか？」）を3つ箇条書きで突きつけてください。日本語で出力してください。""",
+    },
 }
 
-# --- LLM Handlers ---
-def ask_gemini(text, system_prompt, api_key):
-    genai.configure(api_key=api_key)
-    # Gemini 1.5 Flashは高速で無料枠に最適
-    model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=system_prompt)
-    response = model.generate_content(text)
-    return response.text
+PROVIDER_DEFAULTS = {
+    "gemini": ("gemini-1.5-flash", None),
+    "ollama": ("llama3", None),
+    "openai": ("gpt-4o-mini", "https://api.openai.com/v1"),
+    "copilot": ("openai/gpt-4o-mini", "https://models.github.ai/inference"),
+    "claude": ("claude-3-5-sonnet-latest", "https://api.anthropic.com"),
+}
+
+
+class ProviderError(RuntimeError):
+    """Raised when an AI provider cannot return a usable response."""
+
+
+def _request_json(method, url, **kwargs):
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            request = requests.post if method.upper() == "POST" else requests.request
+            response = request(url, timeout=REQUEST_TIMEOUT, **kwargs)
+            status_code = getattr(response, "status_code", 200)
+            if isinstance(status_code, int) and (
+                status_code == 429 or status_code >= 500
+            ):
+                if attempt < MAX_RETRIES - 1:
+                    sleep(2**attempt)
+                    continue
+            response.raise_for_status()
+            return response.json()
+        except (requests.exceptions.RequestException, ValueError) as error:
+            last_error = error
+            if attempt < MAX_RETRIES - 1:
+                sleep(2**attempt)
+    raise ProviderError(f"AIプロバイダへの通信に失敗しました: {last_error}")
+
+
+def ask_gemini(text, system_prompt, api_key, model_name="gemini-1.5-flash"):
+    if not api_key:
+        raise ProviderError("Gemini APIキーが設定されていません。")
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name, system_instruction=system_prompt)
+        response = model.generate_content(text)
+        result = getattr(response, "text", None)
+        if not result:
+            raise ProviderError("Geminiの応答が空です。")
+        return result
+    except ProviderError:
+        raise
+    except Exception as error:
+        raise ProviderError(f"Geminiでの生成に失敗しました: {error}") from error
+
 
 def ask_ollama(text, system_prompt, model_name="llama3"):
     url = "http://localhost:11434/api/generate"
     payload = {
         "model": model_name,
         "prompt": f"{system_prompt}\n\n対象の文章:\n{text}",
-        "stream": False
+        "stream": False,
     }
     try:
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
-        response_data = response.json()
+        response_data = _request_json("POST", url, json=payload)
         ollama_response = response_data.get("response")
         if not ollama_response:
             return "Ollamaの応答形式が不正です。'response' フィールドが見つかりません。"
         return ollama_response
-    except (requests.exceptions.RequestException, ValueError) as e:
-        return f"Ollamaとの通信に失敗しました。Ollamaが起動しているか確認してください。\nError: {e}"
+    except ProviderError as error:
+        return f"Ollamaとの通信に失敗しました。Ollamaが起動しているか確認してください。\nError: {error}"
 
-# --- Main Application ---
-def main():
-    console.print(Panel.fit("[bold red]Antagon 🎭[/bold red]\n[italic]Your Personal Devil's Advocate[/italic]"))
-    
-    # 1. 動作モードの選択 (BYOK or Local)
-    mode = Prompt.ask("使用するAIエンジンを選択してください", choices=["gemini", "ollama"], default="gemini")
-    
-    api_key = ""
-    ollama_model = ""
-    
-    if mode == "gemini":
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            api_key = Prompt.ask("Gemini API Keyを入力してください")
-    else:
-        ollama_model = Prompt.ask("Ollamaのモデル名を入力してください", default="llama3")
 
-    # 2. 攻撃対象のテキスト入力
-    console.print("\n[bold green]攻撃対象の主張や論文のドラフトを入力してください（複数行可。終了するには空行でEnter）:[/bold green]")
+def ask_openai_compatible(
+    text, system_prompt, api_key, model_name, base_url, provider_name="OpenAI"
+):
+    if not api_key:
+        raise ProviderError(f"{provider_name} APIキーが設定されていません。")
+    response_data = _request_json(
+        "POST",
+        f"{base_url.rstrip('/')}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+        },
+    )
+    try:
+        result = response_data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise ProviderError(f"{provider_name}の応答形式が不正です。") from error
+    if not result:
+        raise ProviderError(f"{provider_name}の応答が空です。")
+    return result
+
+
+def ask_claude(text, system_prompt, api_key, model_name="claude-3-5-sonnet-latest"):
+    if not api_key:
+        raise ProviderError("Claude APIキーが設定されていません。")
+    response_data = _request_json(
+        "POST",
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": model_name,
+            "max_tokens": 1024,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": text}],
+        },
+    )
+    try:
+        result = response_data["content"][0]["text"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise ProviderError("Claudeの応答形式が不正です。") from error
+    if not result:
+        raise ProviderError("Claudeの応答が空です。")
+    return result
+
+
+def _read_target_text():
+    console.print(
+        "\n[bold green]攻撃対象の文章を入力してください（空行で終了）:[/bold green]"
+    )
     lines = []
-    while True:
-        line = input()
-        if not line:
-            break
-        lines.append(line)
-    
-    target_text = "\n".join(lines)
-    if not target_text.strip():
+    try:
+        while True:
+            line = input()
+            if not line:
+                break
+            lines.append(line)
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[yellow]入力をキャンセルしました。[/yellow]")
+        return ""
+    return "\n".join(lines).strip()
+
+
+def _select_provider():
+    provider = Prompt.ask(
+        "使用するAIプラットフォームを選択してください",
+        choices=list(PROVIDER_DEFAULTS),
+        default="ollama",
+    )
+    default_model, default_url = PROVIDER_DEFAULTS[provider]
+    env_key = {
+        "gemini": "GEMINI_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "claude": "ANTHROPIC_API_KEY",
+        "copilot": "GITHUB_TOKEN",
+    }.get(provider)
+    api_key = os.environ.get(env_key, "") if env_key else ""
+    if provider != "ollama" and not api_key:
+        api_key = Prompt.ask(f"{provider} APIキー/トークンを入力してください", password=True)
+    model = Prompt.ask("モデル名", default=default_model)
+    base_url = default_url
+    if provider in ("openai", "copilot"):
+        base_url = Prompt.ask("APIベースURL", default=default_url)
+    return provider, api_key, model, base_url
+
+
+def _ask_provider(provider, text, system_prompt, api_key, model, base_url):
+    if provider == "gemini":
+        return ask_gemini(text, system_prompt, api_key, model)
+    if provider == "ollama":
+        return ask_ollama(text, system_prompt, model)
+    if provider == "claude":
+        return ask_claude(text, system_prompt, api_key, model)
+    return ask_openai_compatible(
+        text, system_prompt, api_key, model, base_url, provider.title()
+    )
+
+
+def _save_results(results, provider, model):
+    filename = Prompt.ask("保存先ファイル名", default="antagon-result.md")
+    output = [
+        "# Antagon Red Teaming Result",
+        "",
+        f"- Generated: {datetime.now().astimezone().isoformat(timespec='seconds')}",
+        f"- Provider: {provider}",
+        f"- Model: {model}",
+        "",
+    ]
+    for agent_name, agent_data, result in results:
+        output.extend(
+            [
+                f"## {agent_data['role']}",
+                "",
+                result,
+                "",
+            ]
+        )
+    Path(filename).write_text("\n".join(output), encoding="utf-8")
+    console.print(f"[green]結果を {filename} に保存しました。[/green]")
+
+
+def main():
+    console.print(
+        Panel.fit("[bold red]Antagon 🎭[/bold red]\n[italic]Your Personal Devil's Advocate[/italic]")
+    )
+    provider, api_key, model, base_url = _select_provider()
+    target_text = _read_target_text()
+    if not target_text:
         console.print("[red]テキストが入力されていません。終了します。[/red]")
         return
 
     console.print("\n[bold red]💥 Multi-Agent Red Teaming Initiated...[/bold red]")
+    results = [None] * len(AGENTS)
+    with Progress() as progress:
+        tasks = {
+            name: progress.add_task(
+                f"[bold {data['color']}] {data['role']} が解析中...", total=100
+            )
+            for name, data in AGENTS.items()
+        }
+        with ThreadPoolExecutor(max_workers=len(AGENTS)) as executor:
+            futures = {
+                executor.submit(
+                    _ask_provider,
+                    provider,
+                    target_text,
+                    data["prompt"],
+                    api_key,
+                    model,
+                    base_url,
+                ): (index, name, data)
+                for index, (name, data) in enumerate(AGENTS.items())
+            }
+            for future in as_completed(futures):
+                index, name, data = futures[future]
+                try:
+                    result = future.result()
+                except Exception as error:
+                    result = f"[red]このエージェントは失敗しました: {error}[/red]"
+                results[index] = (name, data, result)
+                progress.update(tasks[name], completed=100)
 
-    # 3. 各エージェントによる攻撃の実行
-    for agent_name, agent_data in AGENTS.items():
-        with Progress() as progress:
-            task = progress.add_task(f"[bold {agent_data['color']}] {agent_data['role']} があなたの論理を解析中...", total=100)
-            
-            # API呼び出し
-            if mode == "gemini":
-                result = ask_gemini(target_text, agent_data["prompt"], api_key)
-            else:
-                result = ask_ollama(target_text, agent_data["prompt"], ollama_model)
-            
-            progress.update(task, advance=100)
-            
-        # 結果の表示
-        console.print(Panel(Markdown(result), title=f"[bold {agent_data['color']}]{agent_data['role']}[/bold {agent_data['color']}]", border_style=agent_data["color"]))
+    for _, agent_data, result in results:
+        console.print(
+            Panel(
+                Markdown(result),
+                title=f"[bold {agent_data['color']}]{agent_data['role']}[/bold {agent_data['color']}]",
+                border_style=agent_data["color"],
+            )
+        )
+    if Confirm.ask("結果をMarkdownファイルに保存しますか？", default=True):
+        _save_results(results, provider, model)
 
-    console.print("\n[bold]防御（Defense）フェーズはWeb Canvas UIにて実装予定です。[/bold]")
 
 if __name__ == "__main__":
     main()
